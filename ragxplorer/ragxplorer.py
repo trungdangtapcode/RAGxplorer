@@ -29,6 +29,8 @@ from .rag import (
 
 from .projections import (
     set_up_umap,
+    set_up_tsne,
+    set_up_pca,
     get_projections,
     prepare_projections_df,
     plot_embeddings
@@ -70,6 +72,10 @@ class RAGxplorer(BaseModel):
     _projector: Optional[Any] = None
     _query: _Query = _Query()
     _VizData: _VizData = _VizData()
+    _projection_method: Optional[str] = None
+    _umap_params: Optional[dict] = None
+    _tsne_params: Optional[dict] = None
+    _pca_params: Optional[dict] = None
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -94,7 +100,7 @@ class RAGxplorer(BaseModel):
             except Exception as exc:
                 raise ValueError("Invalid embedding model. Please use all-MiniLM-L6-v2, or a valid OpenAI or HuggingFace embedding model.") from exc
 
-    def load_pdf(self, document_path: str, chunk_size: int = 1000, chunk_overlap: int = 0, verbose: bool = False, umap_params: dict = None):
+    def load_pdf(self, document_path: str, chunk_size: int = 1000, chunk_overlap: int = 0, verbose: bool = False, projection_method: str = "umap", umap_params: dict = None, tsne_params: dict = None, pca_params: dict = None):
         """
         Load data from a PDF file and prepare it for exploration.
         
@@ -102,7 +108,21 @@ class RAGxplorer(BaseModel):
             document: Path to the PDF document to load.
             chunk_size: Size of the chunks to split the document into.
             chunk_overlap: Number of tokens to overlap between chunks.
+            projection_method: Method for dimensionality reduction ('umap', 'tsne', or 'pca').
+            umap_params: Parameters for UMAP (if using UMAP).
+            tsne_params: Parameters for t-SNE (if using t-SNE).
+            pca_params: Parameters for PCA (if using PCA).
         """
+        if projection_method not in ["umap", "tsne", "pca"]:
+            raise ValueError("Invalid projection method. Please use 'umap', 'tsne', or 'pca'.")
+            
+        # Store projection method and parameters for later use
+        self._projection_method = projection_method
+        self._umap_params = umap_params
+        self._tsne_params = tsne_params
+        self._pca_params = pca_params
+        self._projection_method = projection_method
+            
         if verbose:
             print(" ~ Building the vector database...")
         self._vectordb = build_vector_database(document_path, chunk_size, chunk_overlap, self._chosen_embedding_model)
@@ -112,13 +132,30 @@ class RAGxplorer(BaseModel):
         self._documents.text = get_docs(self._vectordb)
         self._documents.ids = self._vectordb.get()['ids']
         if verbose:
-            print(" ~ Reducing the dimensionality of embeddings...")
-        self._projector = set_up_umap(embeddings=self._documents.embeddings, umap_params=umap_params)
-        self._documents.projections = get_projections(embedding=self._documents.embeddings,
-                                                      umap_transform=self._projector)
-        self._VizData.base_df = prepare_projections_df(document_ids=self._documents.ids,
-                                                                document_projections=self._documents.projections,
-                                                                document_text=self._documents.text)
+            print(f" ~ Reducing the dimensionality of embeddings using {projection_method.upper()}...")
+        
+        if projection_method == "umap":
+            self._projector = set_up_umap(embeddings=self._documents.embeddings, umap_params=umap_params)
+            self._documents.projections = get_projections(embedding=self._documents.embeddings,
+                                                          umap_transform=self._projector)
+        elif projection_method == "tsne":
+            # For t-SNE, we don't pre-compute projections since we need to include query at visualization time
+            self._projector = None
+            self._documents.projections = None
+            if verbose:
+                print("t-SNE projections will be computed during query visualization")
+        elif projection_method == "pca":
+            self._projector, self._documents.projections = set_up_pca(embeddings=self._documents.embeddings, pca_params=pca_params)
+            # Convert projections to the expected format (x, y tuple)
+            self._documents.projections = (self._documents.projections[:, 0], self._documents.projections[:, 1])
+        
+        if projection_method != "tsne":
+            self._VizData.base_df = prepare_projections_df(document_ids=self._documents.ids,
+                                                                    document_projections=self._documents.projections,
+                                                                    document_text=self._documents.text)
+        else:
+            self._VizData.base_df = None  # Will be created during visualization for t-SNE
+            
         if verbose:
             print("Completed reducing dimensionality of embeddings ✓")
 
@@ -126,22 +163,67 @@ class RAGxplorer(BaseModel):
         if import_projection_data is not None:
             self._VizData.base_df = import_projection_data
         else:
-            if self._vectordb is None or self._VizData.base_df is None:
+            if self._vectordb is None or self._VizData.base_df is None and projection_method != "tsne":
                 raise RuntimeError("Please load the pdf first.")
+            
+        projection_method = self._projection_method
         
         if retrieval_method not in ["naive", "HyDE", "multi_qns"]:
             raise ValueError("Invalid retrieval method. Please use naive, HyDE, or multi_qns.")
 
+        if projection_method not in ["umap", "tsne", "pca"]:
+            raise ValueError("Invalid projection method. Please use umap, tsne, or pca.")
+
         self._query.original_query = query
 
-        if (self.embedding_model == "all-MiniLM-L6-v2") or (self.embedding_model in OPENAI_EMBEDDING_MODELS):
-            # Brackets around the query required as per latest update to openai client (https://platform.openai.com/docs/guides/embeddings/use-cases). 
-            # It doesn't look like chromadb updated to reflect this.
-            self._query.original_query_projection = get_projections(embedding=self._chosen_embedding_model([self._query.original_query]),
-                                                                    umap_transform=self._projector)
-        else:
-            self._query.original_query_projection = get_projections(embedding=[self._chosen_embedding_model(self._query.original_query)],
-                                                                    umap_transform=self._projector)
+        if projection_method == "umap":
+            if (self.embedding_model == "all-MiniLM-L6-v2") or (self.embedding_model in OPENAI_EMBEDDING_MODELS):
+                # Brackets around the query required as per latest update to openai client (https://platform.openai.com/docs/guides/embeddings/use-cases). 
+                # It doesn't look like chromadb updated to reflect this.
+                self._query.original_query_projection = get_projections(embedding=self._chosen_embedding_model([self._query.original_query]),
+                                                                        umap_transform=self._projector)
+            else:
+                self._query.original_query_projection = get_projections(embedding=[self._chosen_embedding_model(self._query.original_query)],
+                                                                        umap_transform=self._projector)
+        elif projection_method == "tsne":
+            import numpy as np
+            
+            # Get query embedding
+            if (self.embedding_model == "all-MiniLM-L6-v2") or (self.embedding_model in OPENAI_EMBEDDING_MODELS):
+                query_embedding = self._chosen_embedding_model([self._query.original_query])
+            else:
+                query_embedding = [self._chosen_embedding_model(self._query.original_query)]
+            
+            # Concatenate query embedding with document embeddings
+            combined_embeddings = np.vstack([self._documents.embeddings, query_embedding])
+            
+            # Run t-SNE on the combined embeddings
+            _, combined_projections = set_up_tsne(embeddings=combined_embeddings, tsne_params=self._tsne_params)
+            
+            # Separate document projections and query projection
+            doc_projections = combined_projections[:-1]  # All but last
+            query_projection = combined_projections[-1:] # Last one (query)
+            
+            # Update document projections
+            self._documents.projections = (doc_projections[:, 0], doc_projections[:, 1])
+            
+            # Set query projection
+            self._query.original_query_projection = ([query_projection[0, 0]], [query_projection[0, 1]])
+            
+            # Create base_df for documents if it doesn't exist
+            if self._VizData.base_df is None:
+                self._VizData.base_df = prepare_projections_df(document_ids=self._documents.ids,
+                                                                        document_projections=self._documents.projections,
+                                                                        document_text=self._documents.text)
+        elif projection_method == "pca":
+            if (self.embedding_model == "all-MiniLM-L6-v2") or (self.embedding_model in OPENAI_EMBEDDING_MODELS):
+                query_embedding = self._chosen_embedding_model([self._query.original_query])
+            else:
+                query_embedding = [self._chosen_embedding_model(self._query.original_query)]
+            
+            # For PCA, we can transform the query embedding using the fitted transformer
+            query_projection = self._projector.transform(query_embedding)
+            self._query.original_query_projection = (query_projection[:, 0], query_projection[:, 1])
 
         self._VizData.query_df = pd.DataFrame({"x": [self._query.original_query_projection[0][0]],
                                       "y": [self._query.original_query_projection[1][0]],
@@ -196,37 +278,55 @@ class RAGxplorer(BaseModel):
         """
         return self._vectordb
     
-    def load_chroma(self, chroma_collection: Collection, initialize_projector: bool = False, recompute_projections: bool = False, umap_params: dict = None,verbose:bool=True):
+    def load_chroma(self, chroma_collection: Collection, initialize_projector: bool = False, recompute_projections: bool = False, projection_method: str = "umap", umap_params: dict = None, tsne_params: dict = None, pca_params: dict = None, verbose: bool = True):
         """
         Load ChromaDB collection.
         """
+        if projection_method not in ["umap", "tsne", "pca"]:
+            raise ValueError("Invalid projection method. Please use 'umap', 'tsne', or 'pca'.")
+            
         self._vectordb = chroma_collection
         self._documents.embeddings = get_doc_embeddings(self._vectordb)
         self._documents.text = get_docs(self._vectordb)
         self._documents.ids = self._vectordb.get()['ids']
         if initialize_projector:
             if verbose:
-                print("Setting up umap projector")
-            self._projector = set_up_umap(embeddings=self._documents.embeddings, umap_params=umap_params)
+                print(f"Setting up {projection_method} projector")
+            if projection_method == "umap":
+                self._projector = set_up_umap(embeddings=self._documents.embeddings, umap_params=umap_params)
+            elif projection_method == "tsne":
+                self._projector, _ = set_up_tsne(embeddings=self._documents.embeddings, tsne_params=tsne_params)
+            elif projection_method == "pca":
+                self._projector, _ = set_up_pca(embeddings=self._documents.embeddings, pca_params=pca_params)
+                
         if recompute_projections:
             if verbose:
                 print("Recomputing projections")
-            self._projector = set_up_umap(embeddings=self._documents.embeddings, umap_params=umap_params)
-            self._documents.projections = get_projections(embedding=self._documents.embeddings,
-                                                        umap_transform=self._projector)
+            if projection_method == "umap":
+                self._projector = set_up_umap(embeddings=self._documents.embeddings, umap_params=umap_params)
+                self._documents.projections = get_projections(embedding=self._documents.embeddings,
+                                                            umap_transform=self._projector)
+            elif projection_method == "tsne":
+                self._projector, projections = set_up_tsne(embeddings=self._documents.embeddings, tsne_params=tsne_params)
+                self._documents.projections = (projections[:, 0], projections[:, 1])
+            elif projection_method == "pca":
+                self._projector, projections = set_up_pca(embeddings=self._documents.embeddings, pca_params=pca_params)
+                self._documents.projections = (projections[:, 0], projections[:, 1])
+                
             self._VizData.base_df = prepare_projections_df(document_ids=self._documents.ids,
                                                                     document_projections=self._documents.projections,
                                                                     document_text=self._documents.text)
         
+        
     def export_projector(self) -> umap.UMAP:
         """
-        Export the UMAP projector.
+        Export the UMAP, PCA, t-SNE projector.
         """
         return self._projector
     
     def load_projector(self, umap_transform: umap.UMAP, recompute_projections: bool = False):
         """
-        Load UMAP projector.
+        Load UMAP, PCA, t-SNE projector.
         """
         self._projector = umap_transform
         if recompute_projections:
@@ -237,7 +337,7 @@ class RAGxplorer(BaseModel):
                                                            document_text=self._documents.text)
     def run_projector(self):
         """
-        Run UMAP projector.
+        Run UMAP, PCA, t-SNE projector.
         """
         self._documents.projections = get_projections(embedding=self._documents.embeddings,
                                                       umap_transform=self._projector)

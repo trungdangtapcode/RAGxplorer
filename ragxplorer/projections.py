@@ -11,10 +11,53 @@ import umap
 import pandas as pd
 import plotly.graph_objs as go
 from tqdm import tqdm
+from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
 
 from .constants import VISUALISATION_SETTINGS, PLOT_SIZE
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
+
+def set_up_tsne(embeddings: np.ndarray, tsne_params: dict = None) -> TSNE:
+    """
+    Sets up and fits a t-SNE transformer to the given embeddings.
+
+    Args:
+        embeddings (np.ndarray): An array of embeddings to fit the t-SNE transformer.
+        tsne_params (dict, optional): Parameters for TSNE (e.g., n_components, perplexity, learning_rate).
+
+    Returns:
+        TSNE: A fitted TSNE transformer.
+        np.ndarray: The projected embeddings in reduced dimensions.
+    """
+    if tsne_params is None:
+        tsne_transform = TSNE(n_components=2, random_state=42)
+    else:
+        tsne_transform = TSNE(**tsne_params)
+
+    projections = tsne_transform.fit_transform(embeddings)
+    return tsne_transform, projections
+
+def set_up_pca(embeddings: np.ndarray, pca_params: dict = None) -> PCA:
+    """
+    Sets up and fits a PCA transformer to the given embeddings.
+
+    Args:
+        embeddings (np.ndarray): An array of embeddings to fit the PCA transformer.
+        pca_params (dict, optional): Parameters for PCA (e.g., n_components, whiten, svd_solver).
+
+    Returns:
+        PCA: A fitted PCA transformer.
+        np.ndarray: The projected embeddings in reduced dimensions.
+    """
+    if pca_params is None:
+        pca_transform = PCA(n_components=2, random_state=42)
+    else:
+        pca_transform = PCA(**pca_params)
+
+    projections = pca_transform.fit_transform(embeddings)
+    return pca_transform, projections
 
 def set_up_umap(embeddings: np.ndarray, umap_params:dict = None) -> umap.UMAP:
     """
@@ -44,6 +87,7 @@ def get_projections(embedding: np.ndarray, umap_transform: umap.UMAP) -> Tuple[n
         Tuple[np.ndarray, np.ndarray]: X and Y coordinates of the projected embeddings.
     """
     # Ensure embeddings are 2D
+    embedding = np.array(embedding)
     if embedding.ndim > 2:
         embedding = embedding.reshape(embedding.shape[0], -1)
     projections = _project_embeddings(embedding, umap_transform)

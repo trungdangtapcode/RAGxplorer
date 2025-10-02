@@ -316,3 +316,7 @@ pyrightconfig.json
 # End of https://www.toptal.com/developers/gitignore/api/python,macos,visualstudiocode,jetbrains+all
 
 .streamlit/secrets.toml
+
+demo.py
+demo.ipynb
+*.pdf
