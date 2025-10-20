@@ -160,13 +160,13 @@ class RAGxplorer(BaseModel):
             print("Completed reducing dimensionality of embeddings ✓")
 
     def visualize_query(self, query: str, retrieval_method: str="naive", top_k:int=5, query_shape_size:int=5, import_projection_data:pd.DataFrame = None) -> go.Figure:
+        projection_method = self._projection_method
         if import_projection_data is not None:
             self._VizData.base_df = import_projection_data
         else:
             if self._vectordb is None or self._VizData.base_df is None and projection_method != "tsne":
                 raise RuntimeError("Please load the pdf first.")
             
-        projection_method = self._projection_method
         
         if retrieval_method not in ["naive", "HyDE", "multi_qns"]:
             raise ValueError("Invalid retrieval method. Please use naive, HyDE, or multi_qns.")
